@@ -22,7 +22,7 @@ class SubscriberSMS(models.Model):
 class Client(models.Model):
     create_date = models.DateTimeField(auto_now_add=True)
     email = models.EmailField(unique=True)
-    phone = models.CharField(unique=True, max_length=20)
+    phone = models.CharField(max_length=20)
 
     def __str__(self):
         return self.email
@@ -30,8 +30,8 @@ class Client(models.Model):
 
 class User(models.Model):
     create_date = models.DateTimeField(auto_now_add=True)
-    email = models.EmailField(unique=True)
-    phone = models.CharField(unique=True, max_length=20)
+    email = models.EmailField()
+    phone = models.CharField(max_length=20)
     gdpr_consent = models.BooleanField(default=False)
 
     def __str__(self):
