@@ -1,83 +1,118 @@
 import csv
 import tempfile
-
+from django.apps import apps
 from django.core.management.base import BaseCommand
 from users.models import User, Subscriber, SubscriberSMS, Client
+
 
 class Command(BaseCommand):
     help = 'Users import'
 
-    clients_raw_sl = "select users_client.phone, " \
-                     "users_client.id, users_client.email, " \
-                     "users_subscriber.gdpr_consent as gdpr_consent, " \
-                     "count(*) over (partition by users_client.phone) as " \
-                     "number_of " \
-                     "from users_client " \
-                     "inner join users_subscriber " \
-                     "on users_client.email = users_subscriber.email " \
-                     "" \
-                     "left join users_user " \
-                     "on users_subscriber.email = users_user.email " \
-                     "" \
-                     "join users_client uc " \
-                     "on users_client.id = uc.id " \
-                     "where not exists(select 1 from users_user " \
-                     "where users_client.phone = users_user.phone " \
-                     "and users_client.email != users_user.email) " \
-                     "and users_user.email is null"
+    #user based on client
+    clients_raw_sql = \
+        "select users_client.phone, " \
+        "users_client.id, users_client.email, " \
+        "users_{model}.gdpr_consent as gdpr_consent, " \
+        "count(*) over (partition by users_client.phone) as " \
+        "number_of " \
+        "from users_client " \
+        "inner join users_{model} " \
+        "on users_client.{col1} = users_{model}.{col1} " \
+        "" \
+        "left join users_user " \
+        "on users_{model}.{col1} = users_user.{col1} " \
+        "" \
+        "join users_client uc " \
+        "on users_client.id = uc.id " \
+        "where not exists(select 1 from users_user " \
+        "where users_client.{col2} = users_user.{col2} " \
+        "and users_client.{col1} != users_user.{col1}) " \
+        "and users_user.{col1} is null order by users_{model}.id"
 
-    subscribers_raw_sql = "select " \
-                          "users_subscriber.email, " \
-                          "users_subscriber.id," \
-                          "users_subscriber.gdpr_consent " \
-                          "from users_client " \
-                          "" \
-                          "inner join users_subscriber " \
-                          "on users_client.email = users_subscriber.email " \
-                          "" \
-                          "left join users_user on users_subscriber.email = users_user.email " \
-                          "" \
-                          "where exists(" \
-                          "select 1 from users_user where users_client.phone = users_user.phone " \
-                          "and users_client.email != users_user.email) " \
-                          "and users_user.email is null order by users_subscriber.id"
+    #subscribers conflicts
+    subscribers_raw_sql = \
+        "select " \
+        "users_{model}.{col1}, " \
+        "users_{model}.id," \
+        "users_{model}.gdpr_consent " \
+        "from users_client " \
+        "" \
+        "inner join users_{model} " \
+        "on users_client.{col1} = users_{model}.{col1} " \
+        "" \
+        "left join users_user on users_{model}.{col1} = users_user.{col1} " \
+        "" \
+        "where exists(" \
+        "select 1 from users_user where users_client.{col2} = users_user.{col2} " \
+        "and users_client.{col1} != users_user.{col1}) " \
+        "and users_user.{col1} is null order by users_{model}.id"
 
-    empty_phone_raw_sql = "select " \
-                          "users_subscriber.email, " \
-                          "users_subscriber.id, " \
-                          "users_subscriber.gdpr_consent " \
-                          "from users_client " \
-                          "right join users_subscriber " \
-                          "on users_client.email = users_subscriber.email " \
-                          "" \
-                          "left join users_user " \
-                          "on users_subscriber.email = users_user.email " \
-                          "" \
-                          "where users_client.email is null and users_user.email is null"
+    #users with empty phones
+    empty_phone_raw_sql = \
+        "select " \
+        "users_{model}.{col1}, " \
+        "users_{model}.id, " \
+        "users_{model}.gdpr_consent " \
+        "from users_client " \
+        "right join users_{model} " \
+        "on users_client.{col1} = users_{model}.{col1} " \
+        "" \
+        "left join users_user " \
+        "on users_{model}.{col1} = users_user.{col1} " \
+        "" \
+        "where users_client.{col1} is null and users_user.{col1} is null"
 
     def handle(self, *args, **options):
-        self.users_from_clients()
-        self.subscribers_conflicts_csv()
-        self.users_empty_phone()
+        conditions = {
+            'subscriber': {
+                'model': 'subscriber',
+                'col1': 'email',
+                'col2': 'phone'
+            },
+            'subscribersms': {
+                'model': 'subscribersms',
+                'col1': 'phone',
+                'col2': 'email'
+            }
+        }
+        for k, v in conditions.items():
+            self.users_from_clients(v)
+            # self.subscribers_conflicts(v)
+            # self.users_empty_phone(v)
 
-    def users_from_clients(self):
-        clients = Client.objects.raw(self.clients_raw_sl)
-        bulk = [User(email=c.email, phone=c.phone, gdpr_consent=c.gdpr_consent)
+    def users_from_clients(self, conditions):
+        clients = Client.objects.raw(self.clients_raw_sql.format(**conditions))
+        users_bulk = [User(email=c.email, phone=c.phone,
+                       gdpr_consent=c.gdpr_consent)
                 for c in clients if c.number_of == 1]
-        User.objects.bulk_create(bulk)
 
-    def subscribers_conflicts_csv(self):
-        subscribers = Subscriber.objects.raw(self.subscribers_raw_sql)
+        User.objects.bulk_create(users_bulk)
+        self.get_conflicts_csv([c for c in clients if c.number_of > 1],
+                               'client_conflicts', conditions['col1'])
+
+    def subscribers_conflicts(self, conditions):
+        model = apps.get_model('users', conditions['model'])
+        subscribers = model.objects.raw(self.subscribers_raw_sql.format(
+            **conditions))
+        self.get_conflicts_csv(subscribers, '{}_conflicts'.format(conditions['model']),
+                               conditions['col1'])
+
+    def users_empty_phone(self, conditions):
+        model = apps.get_model('users', conditions['model'])
+        subscribers = model.objects.raw(self.empty_phone_raw_sql.format(
+            **conditions))
+        users_bulk = [User(email=getattr(s, 'email', None),
+                           phone=getattr(s, 'phone', None),
+                           gdpr_consent=s.gdpr_consent)
+                for s in subscribers]
+        User.objects.bulk_create(users_bulk)
+
+    @staticmethod
+    def get_conflicts_csv(rows, name, col_name):
         filename = tempfile.NamedTemporaryFile(suffix='.csv',
-                                               prefix='subscriber_conflicts',
+                                               prefix=name,
                                                delete=False)
         with open(filename.name, 'w', encoding='utf8', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['ID', 'Email'])
-            writer.writerows([[row.id, row.email] for row in subscribers])
-
-    def users_empty_phone(self):
-        subscribers = Subscriber.objects.raw(self.empty_phone_raw_sql)
-        bulk = [User(email=s.email, gdpr_consent=s.gdpr_consent)
-                for s in subscribers]
-        User.objects.bulk_create(bulk)
+            writer.writerow(['ID', col_name])
+            writer.writerows(([row.id, getattr(row, col_name)] for row in rows))
