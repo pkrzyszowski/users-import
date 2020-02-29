@@ -1,6 +1,3 @@
-import csv
-import tempfile
-from time import time
 from django.apps import apps
 from django.core.management.base import BaseCommand
 from django.db import models
@@ -10,76 +7,76 @@ from users.models import User, Subscriber, SubscriberSMS, Client
 
 
 class Command(BaseCommand):
-    help = 'Users import'
+    help = 'Users consents update'
 
-    subscribers_matched = \
-        "select users_subscriber.email, " \
-        "users_subscriber.gdpr_consent, " \
-        "users_subscriber.id, " \
+    users_subscribers_raw_sql = \
+        "select users_{model}.{col}, " \
+        "users_{model}.gdpr_consent, " \
+        "users_{model}.id, " \
         "users_user.id as user_id " \
-        "from users_subscriber " \
+        "from users_{model} " \
         "inner join users_user " \
-        "on users_subscriber.email = users_user.email;"
-
-    subscribers_sms_matched = \
-        "select users_subscribersms.phone, " \
-        "users_subscribersms.gdpr_consent, " \
-        "users_subscribersms.id, " \
-        "users_user.id as user_id " \
-        "from users_subscribersms " \
-        "inner join users_user " \
-        "on users_subscribersms.phone = users_user.phone;"
+        "on users_{model}.{col} = users_user.{col};"
 
     def handle(self, *args, **options):
-        # conditions = {
-        #     'subscriber': {
-        #         'model': 'subscriber',
-        #         'col1': 'email',
-        #         'col2': 'phone'
-        #     },
-        #     'subscribersms': {
-        #         'model': 'subscribersms',
-        #         'col1': 'phone',
-        #         'col2': 'email'
-        #     }
-        # }
-        # for k, v in conditions.items():
         self.update_users_consents()
+        self.stdout.write(
+            self.style.SUCCESS('Finish'))
+
 
     def update_users_consents(self):
-        subscribers = Subscriber.objects.raw(self.subscribers_matched)
-        subscribers_users_ids = [subscriber.user_id for subscriber in
-                                 subscribers]
+        subscribers, subscribers_users_ids = \
+            self.get_subscribers('subscriber', 'email')
 
-        subscribers_sms = SubscriberSMS.objects.raw(
-            self.subscribers_sms_matched)
-        subscribers_sms_users_ids = [s.user_id for s in subscribers_sms]
+        subscribers_sms, subscribers_sms_users_ids = \
+            self.get_subscribers('subscribersms', 'phone')
 
-        #in sub and sms
         matched_users_ids = list(set(subscribers_users_ids).intersection(
             subscribers_sms_users_ids))
 
-        #update consents based on subscribers
-        self._update_consents(subscribers, subscribers_users_ids, matched_users_ids)
-
-        #update consents based on subscribers sms
+        #subscriber
+        self._update_consents(subscribers, subscribers_users_ids,
+                              matched_users_ids)
+        # #subscriber sms
         self._update_consents(subscribers, subscribers_sms_users_ids,
                               matched_users_ids)
 
-        # update consents based on subscribers or subscribers sms
-        # ___users = User.objects.filter(pk__in=matched_users). \
-        #     annotate(consent=Case(*[
-        #     When(id=s.user_id, create_date__lte=s.create_date, then=Value(
-        #         s.gdpr_consent))
-        #     for s in subscribers_sms], default=F('gdpr_consent'),
-        #         output_field=models.BooleanField(),
-        # ))
+        #matched users
+        self._update_matched_users_consents(subscribers, subscribers_sms,
+                                            matched_users_ids)
 
-    def _update_consents(self, subscribers, users_ids, matched_users_ids):
+    def get_subscribers(self, model, col):
+        _model = apps.get_model('users', model)
+        subscribers = _model.objects.raw(
+            self.users_subscribers_raw_sql.format(model=model, col=col))
+        subscribers_users_ids = [subscriber.user_id for subscriber in
+                                 subscribers]
+        return subscribers, subscribers_users_ids
+
+    @staticmethod
+    def _update_consents(subscribers, users_ids, matched_users_ids):
         users = User.objects.filter(pk__in=users_ids).exclude(
             pk__in=matched_users_ids).annotate(consent=Case(*[
             When(id=s.user_id, create_date__lte=s.create_date,
-                 then=Value(s.gdpr_consent)) for s in subscribers],
-                                  default=F('gdpr_consent'),
-                                  output_field=models.BooleanField()))
+                 then=Value(s.gdpr_consent)) for s in subscribers
+        ], default=F('gdpr_consent'), output_field=models.BooleanField()))
+        users.update(gdpr_consent=F('consent'))
+
+    @staticmethod
+    def _update_matched_users_consents(subscribers, subscribers_sms,
+                                       matched_users_ids):
+        subscribers = sorted([s for s in subscribers if s.user_id in
+                              matched_users_ids], key=lambda k:k.user_id)
+        subscribers_sms = sorted([sms for sms in subscribers_sms if
+                                  sms.user_id in matched_users_ids],
+                                 key=lambda k:k.user_id)
+        users = User.objects.filter(pk__in=matched_users_ids).order_by('id')
+        zipped = zip(subscribers, subscribers_sms, users)
+        max_dates = [max(obj, key=lambda k:k.create_date) for obj in zipped]
+
+        users = User.objects.filter(pk__in=matched_users_ids).\
+            annotate(consent=Case(*[
+            When(id=getattr(obj, 'user_id', getattr(obj, 'id')),
+                 then=Value(obj.gdpr_consent)) for obj in max_dates
+        ], default=F('gdpr_consent'), output_field=models.BooleanField()))
         users.update(gdpr_consent=F('consent'))

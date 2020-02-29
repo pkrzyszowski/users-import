@@ -8,8 +8,7 @@ from users.models import User, Subscriber, SubscriberSMS, Client
 class Command(BaseCommand):
     help = 'Users import'
 
-    #user based on client
-    clients_raw_sql = \
+    users_based_on_clients_raw_sql = \
         "select users_client.phone, " \
         "users_client.id, users_client.email, " \
         "users_{model}.gdpr_consent as gdpr_consent, " \
@@ -29,8 +28,7 @@ class Command(BaseCommand):
         "and users_client.{col1} != users_user.{col1}) " \
         "and users_user.{col1} is null order by users_{model}.id"
 
-    #subscribers conflicts
-    subscribers_raw_sql = \
+    subscribers_confilcts_raw_sql = \
         "select " \
         "users_{model}.{col1}, " \
         "users_{model}.id," \
@@ -47,8 +45,7 @@ class Command(BaseCommand):
         "and users_client.{col1} != users_user.{col1}) " \
         "and users_user.{col1} is null order by users_{model}.id"
 
-    #users with empty phones
-    empty_phone_raw_sql = \
+    users_incomplete_raw_sql = \
         "select " \
         "users_{model}.{col1}, " \
         "users_{model}.id, " \
@@ -76,35 +73,38 @@ class Command(BaseCommand):
             }
         }
         for k, v in conditions.items():
-            self.users_from_clients(v)
-            # self.subscribers_conflicts(v)
-            # self.users_empty_phone(v)
+            self.create_users_based_on_clients(v)
+            self.get_subscribers_conflicts(v)
+            self.create_users_incomplete(v)
+        self.stdout.write(self.style.SUCCESS('Finish'))
 
-    def users_from_clients(self, conditions):
-        clients = Client.objects.raw(self.clients_raw_sql.format(**conditions))
-        users_bulk = [User(email=c.email, phone=c.phone,
-                       gdpr_consent=c.gdpr_consent)
-                for c in clients if c.number_of == 1]
-
+    def create_users_based_on_clients(self, conditions):
+        clients = Client.objects.raw(self.users_based_on_clients_raw_sql.
+                                     format(**conditions))
+        users_bulk = [
+            User(email=c.email, phone=c.phone, gdpr_consent=c.gdpr_consent)
+            for c in clients if c.number_of == 1
+        ]
         User.objects.bulk_create(users_bulk)
         self.get_conflicts_csv([c for c in clients if c.number_of > 1],
                                'client_conflicts', conditions['col1'])
 
-    def subscribers_conflicts(self, conditions):
+    def get_subscribers_conflicts(self, conditions):
         model = apps.get_model('users', conditions['model'])
-        subscribers = model.objects.raw(self.subscribers_raw_sql.format(
-            **conditions))
-        self.get_conflicts_csv(subscribers, '{}_conflicts'.format(conditions['model']),
-                               conditions['col1'])
+        subscribers = model.objects.raw(self.subscribers_confilcts_raw_sql.
+            format(**conditions))
+        self.get_conflicts_csv(subscribers, '{}_conflicts'.format(
+            conditions['model']), conditions['col1'])
 
-    def users_empty_phone(self, conditions):
+    def create_users_incomplete(self, conditions):
         model = apps.get_model('users', conditions['model'])
-        subscribers = model.objects.raw(self.empty_phone_raw_sql.format(
+        subscribers = model.objects.raw(self.users_incomplete_raw_sql.format(
             **conditions))
-        users_bulk = [User(email=getattr(s, 'email', None),
-                           phone=getattr(s, 'phone', None),
-                           gdpr_consent=s.gdpr_consent)
-                for s in subscribers]
+        users_bulk = [
+            User(email=getattr(s, 'email', None),
+                 phone=getattr(s, 'phone', None),
+                 gdpr_consent=s.gdpr_consent)for s in subscribers
+        ]
         User.objects.bulk_create(users_bulk)
 
     @staticmethod
