@@ -2,13 +2,31 @@ import csv
 import tempfile
 from django.apps import apps
 from django.core.management.base import BaseCommand
-from django.db.models import Subquery, Q, OuterRef, Exists, Count
-
 from users.models import User, Subscriber, SubscriberSMS, Client
 
 
 class Command(BaseCommand):
     help = 'Users import'
+
+    users_based_on_clients_raw_sql = \
+        "select users_client.phone, " \
+        "users_client.id, users_client.email, " \
+        "users_{model}.gdpr_consent as gdpr_consent, " \
+        "count(*) over (partition by users_client.phone) as " \
+        "number_of " \
+        "from users_client " \
+        "inner join users_{model} " \
+        "on users_client.{col1} = users_{model}.{col1} " \
+        "" \
+        "left join users_user " \
+        "on users_{model}.{col1} = users_user.{col1} " \
+        "" \
+        "join users_client uc " \
+        "on users_client.id = uc.id " \
+        "where not exists(select 1 from users_user " \
+        "where users_client.{col2} = users_user.{col2} " \
+        "and users_client.{col1} != users_user.{col1}) " \
+        "and users_user.{col1} is null order by users_{model}.id"
 
     subscribers_confilcts_raw_sql = \
         "select " \
@@ -61,22 +79,14 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS('Finish'))
 
     def create_users_based_on_clients(self, conditions):
-        users = User.objects.values('email')
-        clients = Client.objects.annotate(gdpr_consent=Subquery(
-            Subscriber.objects.filter(
-                Q(email=OuterRef('email')) & Q(email__in=users)).values(
-                'gdpr_consent')), usr=~Exists(
-            User.objects.filter(~Q(phone=OuterRef('phone')),
-                                email=OuterRef('email'))),
-            email_count=Count('email')).filter(
-            gdpr_consent__isnull=False, usr=True)
-
+        clients = Client.objects.raw(self.users_based_on_clients_raw_sql.
+                                     format(**conditions))
         users_bulk = [
             User(email=c.email, phone=c.phone, gdpr_consent=c.gdpr_consent)
-            for c in clients if c.email_count == 1
+            for c in clients if c.number_of == 1
         ]
         User.objects.bulk_create(users_bulk)
-        self.get_conflicts_csv([c for c in clients if c.email_count > 1],
+        self.get_conflicts_csv([c for c in clients if c.number_of > 1],
                                'client_conflicts', conditions['col1'])
 
     def get_subscribers_conflicts(self, conditions):
