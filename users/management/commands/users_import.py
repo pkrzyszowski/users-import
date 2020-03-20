@@ -16,6 +16,7 @@ class Command(BaseCommand):
         self.get_subscribers_conflicts()
         self.get_subscribers_conflicts_sms()
         self.create_users_incomplete()
+        self.create_users_incomplete_sms()
         self.stdout.write(self.style.SUCCESS('Finish'))
 
     def create_users_based_on_clients(self):
@@ -28,6 +29,7 @@ class Command(BaseCommand):
                                 phone=OuterRef('phone'))),
             phone_count=Count('phone')).filter(
             gdpr_consent__isnull=False, usr=True)
+
         self.create_users(clients, 'email')
 
     def create_users_based_on_clients_sms(self):
