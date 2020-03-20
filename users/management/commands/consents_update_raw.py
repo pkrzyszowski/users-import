@@ -1,13 +1,22 @@
 from django.apps import apps
 from django.core.management.base import BaseCommand
 from django.db import models
-from django.db.models import Case, When, Value, F, Subquery, OuterRef
+from django.db.models import Case, When, Value, F
 
 from users.models import User, Subscriber, SubscriberSMS, Client
 
 
 class Command(BaseCommand):
     help = 'Users consents update'
+
+    users_subscribers_raw_sql = \
+        "select users_{model}.{col}, " \
+        "users_{model}.gdpr_consent, " \
+        "users_{model}.id, " \
+        "users_user.id as user_id " \
+        "from users_{model} " \
+        "inner join users_user " \
+        "on users_{model}.{col} = users_user.{col};"
 
     def handle(self, *args, **options):
         self.update_users_consents()
@@ -38,11 +47,8 @@ class Command(BaseCommand):
 
     def get_subscribers(self, model, col):
         _model = apps.get_model('users', model)
-        kwargs = {col: OuterRef(col)}
-        subscribers = _model.objects.annotate(
-            user_id=Subquery(User.objects.filter(**kwargs).values('id')[:1])
-        ).filter(user_id__isnull=False)
-
+        subscribers = _model.objects.raw(
+            self.users_subscribers_raw_sql.format(model=model, col=col))
         subscribers_users_ids = [subscriber.user_id for subscriber in
                                  subscribers]
         return subscribers, subscribers_users_ids

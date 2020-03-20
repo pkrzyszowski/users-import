@@ -10,90 +10,110 @@ from users.models import User, Subscriber, SubscriberSMS, Client
 class Command(BaseCommand):
     help = 'Users import'
 
-    subscribers_confilcts_raw_sql = \
-        "select " \
-        "users_{model}.{col1}, " \
-        "users_{model}.id," \
-        "users_{model}.gdpr_consent " \
-        "from users_client " \
-        "" \
-        "inner join users_{model} " \
-        "on users_client.{col1} = users_{model}.{col1} " \
-        "" \
-        "left join users_user on users_{model}.{col1} = users_user.{col1} " \
-        "" \
-        "where exists(" \
-        "select 1 from users_user where users_client.{col2} = users_user.{col2} " \
-        "and users_client.{col1} != users_user.{col1}) " \
-        "and users_user.{col1} is null order by users_{model}.id"
-
-    users_incomplete_raw_sql = \
-        "select " \
-        "users_{model}.{col1}, " \
-        "users_{model}.id, " \
-        "users_{model}.gdpr_consent " \
-        "from users_client " \
-        "right join users_{model} " \
-        "on users_client.{col1} = users_{model}.{col1} " \
-        "" \
-        "left join users_user " \
-        "on users_{model}.{col1} = users_user.{col1} " \
-        "" \
-        "where users_client.{col1} is null and users_user.{col1} is null"
-
     def handle(self, *args, **options):
-        conditions = {
-            'subscriber': {
-                'model': 'subscriber',
-                'col1': 'email',
-                'col2': 'phone'
-            },
-            'subscribersms': {
-                'model': 'subscribersms',
-                'col1': 'phone',
-                'col2': 'email'
-            }
-        }
-        for k, v in conditions.items():
-            self.create_users_based_on_clients(v)
-            self.get_subscribers_conflicts(v)
-            self.create_users_incomplete(v)
+        self.create_users_based_on_clients()
+        self.create_users_based_on_clients_sms()
+        self.get_subscribers_conflicts()
+        self.get_subscribers_conflicts_sms()
+        self.create_users_incomplete()
         self.stdout.write(self.style.SUCCESS('Finish'))
 
-    def create_users_based_on_clients(self, conditions):
+    def create_users_based_on_clients(self):
         users = User.objects.values('email')
         clients = Client.objects.annotate(gdpr_consent=Subquery(
             Subscriber.objects.filter(
-                Q(email=OuterRef('email')) & Q(email__in=users)).values(
+                email=OuterRef('email')).exclude(email__in=users).values(
+                'gdpr_consent')), usr=~Exists(
+            User.objects.filter(~Q(email=OuterRef('email')),
+                                phone=OuterRef('phone'))),
+            phone_count=Count('phone')).filter(
+            gdpr_consent__isnull=False, usr=True)
+        self.create_users(clients, 'email')
+
+    def create_users_based_on_clients_sms(self):
+        users = User.objects.values('phone')
+        clients = Client.objects.annotate(gdpr_consent=Subquery(
+            SubscriberSMS.objects.filter(
+                phone=OuterRef('phone')).exclude(phone__in=users).values(
                 'gdpr_consent')), usr=~Exists(
             User.objects.filter(~Q(phone=OuterRef('phone')),
                                 email=OuterRef('email'))),
-            email_count=Count('email')).filter(
+            phone_count=Count('phone')).filter(
             gdpr_consent__isnull=False, usr=True)
 
+        self.create_users(clients, 'phone')
+
+    def create_users(self, clients, col_name):
         users_bulk = [
             User(email=c.email, phone=c.phone, gdpr_consent=c.gdpr_consent)
-            for c in clients if c.email_count == 1
+            for c in clients if c.phone_count == 1
         ]
         User.objects.bulk_create(users_bulk)
-        self.get_conflicts_csv([c for c in clients if c.email_count > 1],
-                               'client_conflicts', conditions['col1'])
+        self.get_conflicts_csv([c for c in clients if c.phone_count > 1],
+                               'client_conflicts', col_name)
 
-    def get_subscribers_conflicts(self, conditions):
-        model = apps.get_model('users', conditions['model'])
-        subscribers = model.objects.raw(self.subscribers_confilcts_raw_sql.
-            format(**conditions))
+    def get_subscribers_conflicts(self):
+        users = User.objects.values('email')
+        clients = Client.objects.annotate(sub_id=Subquery(
+            Subscriber.objects.filter(
+                email=OuterRef('email')).exclude(email__in=users).values(
+                'id')), usr=Exists(
+            User.objects.filter(~Q(email=OuterRef('email')),
+                                phone=OuterRef('phone')))).filter(
+            sub_id__isnull=False, usr=True)
+
+        subscribers = Subscriber.objects.filter(email__in=clients.values_list(
+            'email', flat=True))
         self.get_conflicts_csv(subscribers, '{}_conflicts'.format(
-            conditions['model']), conditions['col1'])
+            'subscriber'), 'email')
 
-    def create_users_incomplete(self, conditions):
-        model = apps.get_model('users', conditions['model'])
-        subscribers = model.objects.raw(self.users_incomplete_raw_sql.format(
-            **conditions))
+    def get_subscribers_conflicts_sms(self):
+        users = User.objects.values('phone')
+        clients = Client.objects.annotate(sub_id=Subquery(
+            SubscriberSMS.objects.filter(
+                phone=OuterRef('phone')).exclude(phone__in=users).values(
+                'id')), usr=Exists(
+            User.objects.filter(~Q(phone=OuterRef('phone')),
+                                email=OuterRef('email')))).filter(
+            sub_id__isnull=False, usr=True)
+
+        subscribers_sms = SubscriberSMS.objects.filter(
+            phone__in=clients.values_list(
+            'phone', flat=True))
+        self.get_conflicts_csv(subscribers_sms, '{}_conflicts'.format(
+            'subscriber_sms'), 'phone')
+
+    def create_users_incomplete(self):
+        users = User.objects.values('email')
+        clients = Client.objects.annotate(
+            sub_id=Subquery(Subscriber.objects.filter(
+                email=OuterRef('email')).exclude(
+                email__in=users).values('id'))).filter(
+            sub_id__isnull=True)
+        subscribers = Subscriber.objects.filter(email__in=clients.values_list(
+            'email', flat=True))
+
         users_bulk = [
             User(email=getattr(s, 'email', None),
-                 phone=getattr(s, 'phone', None),
                  gdpr_consent=s.gdpr_consent)for s in subscribers
+        ]
+        User.objects.bulk_create(users_bulk)
+
+    def create_users_incomplete_sms(self):
+        users = User.objects.values('phone')
+        clients = Client.objects.annotate(
+            sub_id=Subquery(SubscriberSMS.objects.filter(
+                phone=OuterRef('phone')).exclude(
+                phone__in=users).values('id'))).filter(
+            sub_id__isnull=True)
+
+        subscribers_sms = SubscriberSMS.objects.filter(
+            phone__in=clients.values_list(
+            'phone', flat=True))
+
+        users_bulk = [
+            User(phone=getattr(s, 'phone', None),
+                 gdpr_consent=s.gdpr_consent)for s in subscribers_sms
         ]
         User.objects.bulk_create(users_bulk)
 
